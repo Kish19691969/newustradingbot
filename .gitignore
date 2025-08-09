@@ -1,0 +1,29 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Configuration and data files
+trading_config.json
+trading_config_*.json
+*.log
+
+# Environment directories
+.env
+venv/
+env/
+.venv
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Backup files
+*~
+*.bak
+
+# System files
+.DS_Store
+Thumbs.db
