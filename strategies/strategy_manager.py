@@ -1,6 +1,7 @@
 from typing import Dict, Type
 from datetime import datetime
 from .strategy_base import StrategyBase, TradeSignal
+from market_data_handler import MarketDataHandler
 
 class StrategyManager:
     def __init__(self, dashboard, market_data, config):
@@ -9,7 +10,7 @@ class StrategyManager:
         self.config = config
         self.strategies: Dict[str, StrategyBase] = {}
         self.user_login = "Kish19691969"
-        self.last_update = "2025-08-10 04:09:44"
+        self.last_update = "2025-08-10 07:11:20"
 
     def register_strategy(self, strategy_class: Type[StrategyBase]):
         """Register a new strategy"""
