@@ -1,11 +1,12 @@
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QFormLayout, QGroupBox, QLabel,
                              QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton,
-                             QLineEdit, QComboBox, QMessageBox, QFrame)
-from PyQt5.QtCore import Qt, QSettings, QDateTime
+                             QLineEdit, QComboBox, QMessageBox, QFrame, QTableWidgetItem)
+from PyQt5.QtCore import Qt, QSettings, QDateTime, QTimer
 from PyQt5.QtGui import QFont, QPalette, QColor
 import sys
 import json
+import asyncio
 from datetime import datetime
 from strategies.strategy_manager import StrategyManager
 from strategies.strategy2  import Strategy2
@@ -13,9 +14,13 @@ from market_data_handler import MarketDataHandler
 from config import TradingConfig as Config
 from trading_dashboard import TradingDashboard
 
+
 class SettingsWindow(QMainWindow):
+    USER_LOGIN = "Kish19691969"
     def __init__(self):
         super().__init__()
+        # Add this line at the beginning of __init__
+        user_login = "Kish19691969"  # Initialize user login
         current_time = QDateTime.currentDateTime().toString('yyyy-MM-dd HH:mm:ss')
         self.setWindowTitle(f"Trading Bot Configuration")
         self.setMinimumSize(1000, 1600)  # Increased window size
@@ -581,6 +586,14 @@ class SettingsWindow(QMainWindow):
         if msg.exec_() == QMessageBox.Yes:
             QApplication.quit()
 
+    # Add this method to your SettingsWindow class
+    def closeEvent(self, event):
+        """Handle cleanup when window is closed"""
+        loop = asyncio.get_event_loop()
+        if hasattr(self, 'market_data_handler'):
+            loop.create_task(self.market_data_handler.disconnect())
+        event.accept()
+
     def start_trading(self):
         # Validate settings before starting
         if not self.validate_settings():
@@ -640,6 +653,14 @@ class SettingsWindow(QMainWindow):
                     for name in enabled_strategies
                 }
 
+                # Initialize the market data handler if not already initialized
+                if not hasattr(self, 'market_data_handler'):
+                    self.market_data_handler = MarketDataHandler(client_id=199)
+                    self.market_data_handler.user_login = self.user_login
+
+                # Connect the market data handler's logger to the dashboard
+                self.market_data_handler.dashboard_logger = self.trading_dashboard.add_to_system_log
+
                 # Update the existing dashboard's settings
                 self.trading_dashboard.init_settings(
                     account_id=self.account_id.text(),
@@ -652,42 +673,210 @@ class SettingsWindow(QMainWindow):
                     strategy_settings=strategy_settings
                 )
 
-                # Show the dashboard and hide the settings window
+                # Start market data initialization
+                self.trading_dashboard.add_to_system_log(
+                    "Starting market data initialization sequence..."
+                )
+
+                # Create new async task using asyncio.run
+                self.start_async_initialization()
+
+                # Show the trading dashboard
                 self.trading_dashboard.show()
                 self.hide()
 
             except Exception as e:
-                error_msg = QMessageBox()
-                error_msg.setIcon(QMessageBox.Critical)
-                error_msg.setFont(self.default_font)
-                error_msg.setText(f"Error starting trading dashboard: {str(e)}")
-                error_msg.setWindowTitle("Error")
-                error_msg.exec_()
+                error_msg = f"Error starting trading: {str(e)}"
+                self.trading_dashboard.add_to_system_log(error_msg)
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Critical)
+                msg.setFont(self.default_font)
+                msg.setText(error_msg)
+                msg.setWindowTitle("Error")
+                msg.exec_()
 
+    def start_async_initialization(self):
+        """Helper method to start async initialization"""
 
-    # NEW FUNCTION
+        async def init_wrapper():
+            await self.initialize_market_data()
+
+        # Create new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            loop.run_until_complete(init_wrapper())
+        except Exception as e:
+            self.trading_dashboard.add_to_system_log(f"Error in initialization: {str(e)}")
+        finally:
+            loop.close()
+
+    async def initialize_market_data(self):
+        """Initialize and start market data handling"""
+        try:
+            # Step 1: Connect to IB
+            self.trading_dashboard.add_to_system_log("Connecting to Interactive Brokers...")
+            await self.market_data_handler.connect_ib()
+
+            # Step 2: Load tickers
+            self.trading_dashboard.add_to_system_log("Loading ticker list...")
+            self.market_data_handler.load_tickers()
+
+            # Step 3: Fetch initial historical data
+            self.trading_dashboard.add_to_system_log("Fetching initial market data...")
+            if hasattr(self.market_data_handler, 'fetch_all_market_data'):
+                await self.market_data_handler.fetch_all_market_data()
+
+            # Step 4: Start real-time data subscriptions
+            self.trading_dashboard.add_to_system_log("Starting real-time data subscriptions...")
+            if hasattr(self.market_data_handler, 'start_all_realtime_data'):
+                await self.market_data_handler.start_all_realtime_data()
+
+            self.trading_dashboard.add_to_system_log("Market data system fully initialized")
+
+        except Exception as e:
+            error_msg = f"Error initializing market data: {str(e)}"
+            self.trading_dashboard.add_to_system_log(error_msg)
+            raise
     def process_market_data(self, data):
-        """Process new market data through strategies"""
-        # Process through strategy manager
-        self.strategy_manager.process_market_data(data)
+        """
+        Process new market data through strategies
+        Args:
+            data: Dictionary containing:
+                - symbol: The stock symbol
+                - timeframe: The bar timeframe
+                - bar_data: The latest bar data including:
+                    - open, high, low, close, volume
+                    - EMAs (8, 21, 50)
+                    - ATR and ATR ratio
+        """
+        try:
+            # Log the incoming data
+            self.trading_dashboard.add_to_system_log(
+                f"Processing market data for {data['symbol']} on {data['timeframe']}min timeframe"
+            )
 
-        # Update UI after processing
-        self.update_ui()
+            # Process through strategy manager
+            self.strategy_manager.process_market_data(data)
 
-    # NEW FUNCTION
-    def update_ui(self):
-        """Update strategy information in UI"""
+            # Update dashboard UI components
+            self.update_ui(data)
+
+        except Exception as e:
+            self.trading_dashboard.add_to_system_log(
+                f"Error processing market data: {str(e)}"
+            )
+
+
+    def update_ui(self, data):
+        """
+        Update UI components with latest market data
+        Args:
+            data: Same structure as in process_market_data
+        """
+        try:
+            symbol = data['symbol']
+            timeframe = data['timeframe']
+            bar_data = data['bar_data']
+
+            # Update positions table if this symbol is in our positions
+            if hasattr(self.trading_dashboard, 'positions_table'):
+                self._update_positions_table(symbol, bar_data)
+
+            # Update strategy PnL if available
+            if hasattr(self.trading_dashboard, 'strategy_pnl_table'):
+                self._update_strategy_pnl()
+
+            # Update trade log if there are new trades
+            if hasattr(self.trading_dashboard, 'trade_log_table'):
+                self._update_trade_log()
+
+        except Exception as e:
+            self.trading_dashboard.add_to_system_log(
+                f"Error updating UI with market data: {str(e)}"
+            )
+
+
+    def _update_positions_table(self, symbol, bar_data):
+        """Update the positions table with latest price data"""
+        positions_table = self.trading_dashboard.positions_table
+        for row in range(positions_table.rowCount()):
+            symbol_item = positions_table.item(row, 1)  # Assuming symbol is in column 1
+            if symbol_item and symbol_item.text() == symbol:
+                # Update current price
+                current_price_item = positions_table.item(row, 5)  # Assuming current price is in column 5
+                if current_price_item:
+                    current_price_item.setText(f"{bar_data['close']:.2f}")
+
+                # Update PnL
+                entry_price_item = positions_table.item(row, 4)  # Assuming entry price is in column 4
+                shares_item = positions_table.item(row, 3)  # Assuming shares is in column 3
+                if entry_price_item and shares_item:
+                    entry_price = float(entry_price_item.text())
+                    shares = int(shares_item.text())
+                    pnl = (bar_data['close'] - entry_price) * shares
+                    pnl_item = positions_table.item(row, 6)  # Assuming PnL is in column 6
+                    if pnl_item:
+                        pnl_item.setText(f"{pnl:.2f}")
+                        # Update color based on PnL
+                        self.trading_dashboard.update_pnl_color(pnl_item, pnl)
+
+
+    def _update_strategy_pnl(self):
+        """Update the strategy PnL table"""
+        # Get latest PnL from strategy manager for each strategy
         for strategy_name, strategy in self.strategy_manager.strategies.items():
-            strategy.update_status()
+            if hasattr(strategy, 'get_pnl'):
+                pnl = strategy.get_pnl()
+                # Find and update the corresponding row in strategy_pnl_table
+                table = self.trading_dashboard.strategy_pnl_table
+                for row in range(table.rowCount()):
+                    if table.item(row, 0).text() == strategy_name:
+                        pnl_item = table.item(row, 1)
+                        if pnl_item:
+                            pnl_item.setText(f"{pnl:.2f}")
+                            self.trading_dashboard.update_pnl_color(pnl_item, pnl)
+
+
+    def _update_trade_log(self):
+        """Update the trade log with any new trades"""
+        # Get latest trades from strategy manager
+        if hasattr(self.strategy_manager, 'get_recent_trades'):
+            recent_trades = self.strategy_manager.get_recent_trades()
+            table = self.trading_dashboard.trade_log_table
+
+            # Add new trades to the top of the table
+            for trade in recent_trades:
+                row = table.rowCount()
+                table.insertRow(row)
+
+                # Assuming trade contains: datetime, symbol, side, price, size, strategy, notes
+                items = [
+                    QTableWidgetItem(str(trade.get(field, '')))
+                    for field in ['datetime', 'symbol', 'side', 'price', 'size', 'strategy', 'notes']
+                ]
+
+                for col, item in enumerate(items):
+                    table.setItem(row, col, item)
+
 
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
+    try:
+        app = QApplication(sys.argv)
+        app.setStyle('Fusion')
 
-    # Set application style
-    app.setStyle('Fusion')
+        # Create and set the event loop policy for Windows
+        if sys.platform == 'win32':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    # Create and show the window
-    window = SettingsWindow()
-    window.show()
+        # Create and show the window
+        window = SettingsWindow()
+        window.show()
 
-    sys.exit(app.exec_())
+        # Run the application
+        sys.exit(app.exec_())
+
+    except Exception as e:
+        print(f"Error in main loop: {e}")
+        sys.exit(1)
