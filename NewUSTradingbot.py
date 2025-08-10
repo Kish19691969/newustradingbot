@@ -8,6 +8,12 @@ import sys
 import json
 from datetime import datetime
 from trading_dashboard import TradingDashboard
+from strategies import StrategyManager, Strategy2
+
+# Import your Dashboard and other necessary classes
+from dashboard import Dashboard
+from market_data_handler import MarketDataHandler
+from config import Config
 
 class SettingsWindow(QMainWindow):
     def __init__(self):
@@ -15,6 +21,24 @@ class SettingsWindow(QMainWindow):
         current_time = QDateTime.currentDateTime().toString('yyyy-MM-dd HH:mm:ss')
         self.setWindowTitle(f"Trading Bot Configuration")
         self.setMinimumSize(1000, 1600)  # Increased window size
+
+        # First create the dashboard
+        self.dashboard = Dashboard()  # Make sure this is created first
+
+        # Initialize strategy manager after dashboard and market_data_handler
+        self.strategy_manager = StrategyManager(
+            self.dashboard,
+            self.market_data_handler,
+            self.config
+        )
+
+        # Register Strategy2
+        self.strategy_manager.register_strategy(Strategy2)
+
+        # Log initialization
+        self.dashboard.add_to_system_log(
+            f"Strategy Manager initialized at: 2025-08-10 04:20:41 by {self.strategy_manager.user_login}"
+        )
 
         # Set default font for the entire application
         self.default_font = QFont("Arial", 12)  # Increased base font size
@@ -628,6 +652,20 @@ class SettingsWindow(QMainWindow):
                 error_msg.setWindowTitle("Error")
                 error_msg.exec_()
 
+    # NEW FUNCTION
+    def process_market_data(self, data):
+        """Process new market data through strategies"""
+        # Process through strategy manager
+        self.strategy_manager.process_market_data(data)
+
+        # Update UI after processing
+        self.update_ui()
+
+    # NEW FUNCTION
+    def update_ui(self):
+        """Update strategy information in UI"""
+        for strategy_name, strategy in self.strategy_manager.strategies.items():
+            strategy.update_status()
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
