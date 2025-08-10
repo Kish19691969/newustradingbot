@@ -414,3 +414,19 @@ class TradingDashboard(QMainWindow):
                 widget.setForeground(color)
         except ValueError:
             pass
+
+
+    def add_to_system_log(self, message):
+        """Add a message to the system log"""
+        if hasattr(self, 'system_log'):
+            # Append new message with a newline
+            current_text = self.system_log.toPlainText()
+            if current_text:
+                self.system_log.append(message)  # append adds a newline automatically
+            else:
+                self.system_log.setText(message)
+
+            # Auto-scroll to the bottom
+            self.system_log.verticalScrollBar().setValue(
+                self.system_log.verticalScrollBar().maximum()
+            )
