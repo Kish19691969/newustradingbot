@@ -1,4 +1,4 @@
-from ib_insync import *
+from ib_insync import IB, Stock, util
 import pandas as pd
 import asyncio
 from pathlib import Path
@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import numpy as np
 from collections import defaultdict
 import talib
-
+from PyQt5.QtCore import QDateTime
 
 class MarketDataHandler:
     def __init__(self, client_id=199):
@@ -15,16 +15,62 @@ class MarketDataHandler:
         self.client_id = client_id
         self.ticker_data = {}
         self.live_data = defaultdict(dict)
-        self.timeframes = [1, 2, 5, 15, 50]  # minutes
+        self.timeframes = [1, 2, 5, 15, 60]  # minutes
         self.ema_periods = [8, 21, 50]
         self.ticker_list = []
-        self.logger = self._setup_logger()
+        self.dashboard_logger = None
         self.live_bars = {}  # Store live bar data
         self.subscribed_symbols = set()
+        self.user_login = "Kish19691969"  # Initialize user_login attribute
 
         # Separate ATR related data
         self.atr_data = defaultdict(dict)
         self.atr_period = 14
+        self.logger = self._setup_logger()
+
+
+        # Define bar size mapping
+        self.bar_size_map = {
+            1: "1 min",
+            2: "2 mins",
+            3: "3 mins",
+            5: "5 mins",
+            10: "10 mins",
+            15: "15 mins",
+            20: "20 mins",
+            30: "30 mins",
+            60: "1 hour",
+            120: "2 hours",
+            180: "3 hours",
+            240: "4 hours",
+            480: "8 hours",
+        }
+
+
+    @property
+    def user_login(self):
+        return self._user_login
+
+    @user_login.setter
+    def user_login(self, value):
+        self._user_login = value
+
+
+    def log_to_dashboard(self, message, level="INFO"):
+        """
+        Send formatted log message to dashboard
+        Args:
+            message: The message to log
+            level: The log level (INFO, ERROR, WARNING)
+        """
+        if self.dashboard_logger:
+            formatted_message = (
+                f"Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): {QDateTime.currentDateTime().toString('yyyy-MM-dd HH:mm:ss')}\n"
+                f"Current User's Login: {self.user_login}\n"
+                f"Level: {level}\n"
+                f"Message: {message}"
+            )
+            self.dashboard_logger(formatted_message)
 
     def _setup_logger(self):
         """Set up logging configuration"""
@@ -40,57 +86,115 @@ class MarketDataHandler:
         """Connect to IB TWS/Gateway"""
         try:
             await self.ib.connectAsync(host=host, port=port, clientId=self.client_id)
-            self.logger.info(f"Connected to IB on port {port} with client ID {self.client_id}")
+            self.log_to_dashboard(f"Connected to IB on port {port} with client ID {self.client_id}")
 
             # Verify connection
             if self.ib.isConnected():
                 account = self.ib.managedAccounts()[0] if self.ib.managedAccounts() else None
-                self.logger.info(f"Successfully connected. Account: {account}")
+                self.log_to_dashboard(f"Successfully connected. Account: {account}")
             else:
                 raise ConnectionError("Failed to establish IB connection")
 
         except Exception as e:
-            self.logger.error(f"Failed to connect to IB: {e}")
+            self.log_to_dashboard(f"Failed to connect to IB: {e}")
             raise
 
     def load_tickers(self):
-        """Load ticker list from file"""
+        """Load ticker list and create Stock objects"""
         try:
-            ticker_path = Path(r'c:\trading\US_ticker_list_for_trading')
-            self.ticker_list = pd.read_csv(ticker_path, header=None)[0].tolist()
-            self.logger.info(f"Loaded {len(self.ticker_list)} tickers")
+            self.log_to_dashboard("Starting to load ticker list...", "INFO")
+
+            # Read the existing ticker file
+            with open('c:/trading/US_ticker_list_for_trading.txt', 'r') as f:
+                # Read and clean the symbols
+                symbols = []
+                for line in f:
+                    symbol = line.strip()
+                    if symbol and not symbol.startswith('#'):  # Skip empty lines and comments
+                        symbols.append(symbol)
+
+            if not symbols:
+                self.log_to_dashboard("Warning: No valid symbols found in ticker file", "WARNING")
+                return
+
+            # Create Stock objects
+            self.ticker_list = []
+            for symbol in symbols:
+                try:
+                    stock = Stock(symbol, 'SMART', 'USD')
+                    self.ticker_list.append(stock)
+                except Exception as e:
+                    self.log_to_dashboard(f"Error creating Stock object for {symbol}: {str(e)}", "WARNING")
+                    continue
+
+            self.log_to_dashboard(f"Successfully loaded {len(self.ticker_list)} tickers", "INFO")
+
+            # Log the actual tickers loaded
+            ticker_names = [stock.symbol for stock in self.ticker_list]
+            self.log_to_dashboard(f"Loaded tickers: {', '.join(ticker_names)}", "INFO")
+
         except Exception as e:
-            self.logger.error(f"Error loading ticker list: {e}")
+            self.log_to_dashboard(f"Error loading ticker list: {str(e)}", "ERROR")
             raise
+
+        if not self.ticker_list:
+            raise Exception("No valid tickers were loaded")
+
+
+    def get_bar_size(self, mins):
+        """Convert timeframe in minutes to IB bar size format"""
+        if mins not in self.bar_size_map:
+            self.log_to_dashboard(f"Invalid timeframe: {mins} minutes. Using 1 min as default.", "WARNING")
+            return "1 min"
+        return self.bar_size_map[mins]
+
 
     async def fetch_market_data(self, symbol):
         """Fetch historical market data for a single symbol across all timeframes"""
-        contract = Stock(symbol, 'SMART', 'USD')
         try:
+            # Create the Stock object directly from the symbol string
+            if isinstance(symbol, Stock):
+                contract = symbol
+            else:
+                contract = Stock(symbol, 'SMART', 'USD')
+
+            self.log_to_dashboard(f"Requesting market data for {contract.symbol}", "INFO")
+
             qualified = await self.ib.qualifyContractsAsync(contract)
             if not qualified:
-                self.logger.error(f"Could not qualify contract for {symbol}")
+                self.log_to_dashboard(f"Could not qualify contract for {contract.symbol}", "ERROR")
                 return
+
 
             self.ticker_data[symbol] = {}
             for timeframe in self.timeframes:
-                bars = await self.ib.reqHistoricalDataAsync(
-                    qualified[0],
-                    endDateTime='',
-                    durationStr='2 D',
-                    barSizeSetting=f'{timeframe} mins',
-                    whatToShow='TRADES',
-                    useRTH=True
-                )
+                try:
+                    bar_size = self.get_bar_size(timeframe)
+                    self.log_to_dashboard(f"Requesting {bar_size} data for {contract.symbol}", "INFO")
 
-                if bars:
-                    df = util.df(bars)
-                    # Calculate EMAs
-                    for period in self.ema_periods:
-                        df[f'EMA_{period}'] = df['close'].ewm(span=period, adjust=False).mean()
+                    bars = await self.ib.reqHistoricalDataAsync(
+                        qualified[0],
+                        endDateTime='',
+                        durationStr='2 D',
+                        barSizeSetting=bar_size,
+                        whatToShow='TRADES',
+                        useRTH=True
+                    )
 
-                    self.ticker_data[symbol][timeframe] = df
-                    self.logger.info(f"Fetched {timeframe}min data for {symbol}")
+                    if bars:
+                        df = util.df(bars)
+                        # Calculate EMAs
+                        for period in self.ema_periods:
+                            df[f'EMA_{period}'] = df['close'].ewm(span=period, adjust=False).mean()
+
+                        self.ticker_data[contract.symbol][timeframe] = df
+                        self.log_to_dashboard(f"Fetched {bar_size} data for {contract.symbol}", "INFO")
+                    else:
+                        self.log_to_dashboard(f"No data received for {contract.symbol} at {bar_size}", "WARNING")
+
+                except Exception as e:
+                    self.log_to_dashboard(f"Error fetching {timeframe}min data for {contract.symbol}: {str(e)}", "ERROR")
+                    continue
 
             return self.ticker_data[symbol]
 
@@ -100,8 +204,21 @@ class MarketDataHandler:
 
     async def fetch_all_market_data(self):
         """Fetch historical market data for all symbols concurrently"""
-        tasks = [self.fetch_market_data(symbol) for symbol in self.ticker_list]
-        await asyncio.gather(*tasks)
+        try:
+            self.log_to_dashboard("Starting to fetch market data for all symbols", "INFO")
+            tasks = []
+            for stock in self.ticker_list:
+                if isinstance(stock, str):
+                    symbol = stock
+                else:
+                    symbol = stock.symbol
+                tasks.append(self.fetch_market_data(symbol))
+
+            await asyncio.gather(*tasks)
+            self.log_to_dashboard("Completed fetching market data for all symbols", "INFO")
+        except Exception as e:
+            self.log_to_dashboard(f"Error in fetch_all_market_data: {e}", "ERROR")
+            raise
 
     def update_emas(self, symbol, timeframe):
         """Calculate EMAs based on latest data"""
@@ -123,7 +240,7 @@ class MarketDataHandler:
             self.live_data[symbol][timeframe] = latest
 
         except Exception as e:
-            self.logger.error(f"Error updating EMAs for {symbol}: {e}")
+            self.log_to_dashboard(f"Error updating EMAs for {symbol}: {e}", "ERROR")
 
     def calculate_atr_ratio(self, symbol):
         """Calculate ATR and ATR ratio for 1-minute timeframe"""
@@ -166,7 +283,7 @@ class MarketDataHandler:
             return None
 
         except Exception as e:
-            self.logger.error(f"Error calculating ATR ratio for {symbol}: {e}")
+            self.log_to_dashboard(f"Error calculating ATR ratio for {symbol}: {e}", "ERROR")
             return None
 
     def get_latest_atr_data(self, symbol):
@@ -189,74 +306,109 @@ class MarketDataHandler:
             key = f"{symbol}_{timeframe}"
             self.live_bars[key].append(bar_dict)
 
-            # Keep only necessary bars for EMA calculation
-            max_lookback = max(max(self.ema_periods), self.atr_period) * 2
-            if len(self.live_bars[key]) > max_lookback:
-                self.live_bars[key] = self.live_bars[key][-max_lookback:]
-
-            # Update EMAs
+            # Update EMAs and other calculations
             self.update_emas(symbol, timeframe)
+            atr_ratio = self.calculate_atr_ratio(symbol) if timeframe == 1 else None
+
+            # Prepare data package for strategy processing
+            data = {
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'bar_data': {
+                    **bar_dict,
+                    **self.live_data[symbol][timeframe],  # This includes EMAs
+                    'atr_ratio': atr_ratio
+                }
+            }
+
+            # Emit the data to any registered callbacks
+            if hasattr(self, 'data_callback') and self.data_callback:
+                self.data_callback(data)
 
         except Exception as e:
-            self.logger.error(f"Error in bar update for {symbol}: {e}")
+            self.log_to_dashboard(f"Error in bar update for {symbol}: {str(e)}", "ERROR")
 
     async def start_realtime_data(self, symbol):
         """Start real-time data subscription for a symbol"""
-        if symbol in self.subscribed_symbols:
-            return
+        try:
+            # Get symbol string if input is a Stock object
+            symbol_str = symbol.symbol if isinstance(symbol, Stock) else symbol
 
-        contract = Stock(symbol, 'SMART', 'USD')
-        qualified = await self.ib.qualifyContractsAsync(contract)
+            if symbol_str in self.subscribed_symbols:
+                self.log_to_dashboard(f"Already subscribed to {symbol_str}", "INFO")
+                return
 
-        if not qualified:
-            self.logger.error(f"Could not qualify contract for {symbol}")
-            return
+            # Create a new Stock contract
+            contract = Stock(symbol_str, 'SMART', 'USD')
 
-        # Subscribe to real-time bars for each timeframe
-        for timeframe in self.timeframes:
-            self.live_bars[f"{symbol}_{timeframe}"] = []
+            qualified = await self.ib.qualifyContractsAsync(contract)
+            if not qualified:
+                self.log_to_dashboard(f"Could not qualify contract for {symbol_str}", "ERROR")
+                return
 
-            bars = self.ib.reqRealTimeBars(
-                qualified[0],
-                barSize=timeframe,
-                whatToShow='TRADES',
-                useRTH=True
-            )
-            bars.updateEvent += lambda bar, symbol=symbol, tf=timeframe: self.on_bar_update(bar, symbol, tf)
+            # Subscribe to real-time bars for each timeframe
+            for timeframe in self.timeframes:
+                bar_size = self.get_bar_size(timeframe)
+                key = f"{symbol_str}_{timeframe}"
+                self.live_bars[key] = []
 
-        self.subscribed_symbols.add(symbol)
-        self.logger.info(f"Started real-time data subscription for {symbol}")
+                self.log_to_dashboard(f"Requesting real-time {bar_size} bars for {symbol_str}", "INFO")
+
+                bars = self.ib.reqRealTimeBars(
+                    qualified[0],
+                    5,  # Bar period in seconds
+                    'TRADES',
+                    useRTH=True
+                )
+                bars.updateEvent += lambda bar, s=symbol_str, tf=timeframe: self.on_bar_update(bar, s, tf)
+
+            self.subscribed_symbols.add(symbol_str)
+            self.log_to_dashboard(f"Successfully subscribed to {symbol_str}", "INFO")
+
+        except Exception as e:
+            self.log_to_dashboard(f"Error starting real-time data for {symbol}: {str(e)}", "ERROR")
+            raise
 
     async def start_all_realtime_data(self):
         """Start real-time data for all symbols"""
-        for symbol in self.ticker_list:
-            await self.start_realtime_data(symbol)
+        try:
+            self.log_to_dashboard("Starting real-time data subscriptions for all symbols", "INFO")
+            for stock in self.ticker_list:
+                symbol = stock.symbol if isinstance(stock, Stock) else stock
+                await self.start_realtime_data(symbol)
+        except Exception as e:
+            self.log_to_dashboard(f"Error starting all real-time data: {str(e)}", "ERROR")
+            raise
 
     async def stop_realtime_data(self, symbol):
         """Stop real-time data subscription for a symbol"""
-        if symbol not in self.subscribed_symbols:
-            return
-
         try:
-            contract = Stock(symbol, 'SMART', 'USD')
+            # Get symbol string if input is a Stock object
+            symbol_str = symbol.symbol if isinstance(symbol, Stock) else symbol
+
+            if symbol_str not in self.subscribed_symbols:
+                self.log_to_dashboard(f"Not subscribed to {symbol_str}", "INFO")
+                return
+
+            contract = Stock(symbol_str, 'SMART', 'USD')
             qualified = await self.ib.qualifyContractsAsync(contract)
             if qualified:
                 self.ib.cancelRealTimeBars(qualified[0])
 
-            self.subscribed_symbols.remove(symbol)
             # Clean up stored data
+            self.subscribed_symbols.remove(symbol_str)
             for timeframe in self.timeframes:
-                key = f"{symbol}_{timeframe}"
+                key = f"{symbol_str}_{timeframe}"
                 if key in self.live_bars:
                     del self.live_bars[key]
-                if symbol in self.live_data:
-                    if timeframe in self.live_data[symbol]:
-                        del self.live_data[symbol][timeframe]
+                if symbol_str in self.live_data and timeframe in self.live_data[symbol_str]:
+                    del self.live_data[symbol_str][timeframe]
 
-            self.logger.info(f"Stopped real-time data subscription for {symbol}")
+            self.log_to_dashboard(f"Stopped real-time data subscription for {symbol_str}", "INFO")
 
         except Exception as e:
-            self.logger.error(f"Error stopping real-time data for {symbol}: {e}")
+            self.log_to_dashboard(f"Error stopping real-time data for {symbol}: {str(e)}", "ERROR")
+            raise
 
     async def stop_all_realtime_data(self):
         """Stop all real-time data subscriptions"""
